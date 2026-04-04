@@ -1,0 +1,25 @@
+{
+  "name": "tmt-hub",
+  "version": "14.0.0",
+  "description": "TMT HUB v14 — Hub SaaS multi-marketplace",
+  "main": "backend/server/server.js",
+  "scripts": {
+    "start": "node backend/server/server.js",
+    "dev": "node --watch backend/server/server.js",
+    "test": "node tests/connectors.test.js && node tests/api.test.js",
+    "test:connectors": "node tests/connectors.test.js",
+    "test:api": "node tests/api.test.js",
+    "db:schema": "echo 'Copier database/schema.sql dans Supabase SQL Editor'"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.43.0",
+    "axios": "^1.14.0",
+    "cors": "^2.8.6",
+    "dotenv": "^17.3.1",
+    "express": "^4.22.1",
+    "node-fetch": "^3.3.2"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
