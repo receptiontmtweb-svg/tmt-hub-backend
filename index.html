@@ -10613,8 +10613,12 @@ async function autoBootDev() {
 
     console.log('[AUTO_BOOT_DEV] start');
 
-    const API_KEY = 'dev-master-key-1234567890abcdef1234567890';
-    const BASE = 'http://127.0.0.1:3001';
+    const API_KEY = '';
+    const BASE = '';
+    if (!API_KEY || !BASE) {
+      console.warn('[AUTO_BOOT_DEV] disabled: no embedded secrets');
+      return;
+    }
 
     // 1) Cdiscount credentials
     const credResCd = await fetch(`${BASE}/api/credentials`, {
@@ -10625,9 +10629,9 @@ async function autoBootDev() {
       },
       body: JSON.stringify({
         marketplace: 'cdiscount',
-        client_id: 'tmt-hub',
-        client_secret: 'aCxL0g4xCHr9Dh7RtGduJSvDRzJZwADE',
-        sellerId: '19281'
+        client_id: '',
+        client_secret: '',
+        sellerId: ''
       })
     });
     console.log('[AUTO_BOOT_DEV] cdiscount credentials:', await credResCd.text());
@@ -10641,12 +10645,12 @@ async function autoBootDev() {
       },
       body: JSON.stringify({
         marketplace: 'amazon',
-        client_id: 'amzn1.application-oa2-client.9129148388c345a9a5ebdb20ca46e0f0',
-        client_secret: 'amzn1.oa2-cs.v1.7c4aca5c3d728d6bd3bd81f8aa6664f2351b3431c949320cb4865aa45aa790ec',
-        refresh_token: 'Atzr|IwEBIP103gIa3q1FSJBog1NpkB_FoH6D8CruUeRdt_eznjYDe1V-nxkryKvgUvZEGBtCPXfqiolYr4UAy2siMWXR6YW_v7m-nLxj-oShSkASdQ5L1OEGQrq-ZS3rIt9Hp8uRntTV9fiJ9Sabdp8556iwS7nKrMsQ__DZUxd2eWRetcxLAYLgQZlWcXMlnr65de9IRtQJCjtNvoFIRX-OE6BslRl5xwf_LpaRNeQqI23XMYeSRMfZKNR_h6RccGewr71-_kj31HM-w9UuXdGPz8Qw75gGEkLfIaBpEU6xZsmQbcIotTmtwmWRG47u0Lo43iz68_o',
+        client_id: '',
+        client_secret: '',
+        refresh_token: '',
         region: 'eu',
-        sellerId: 'A1HKQS6GPD9WOS',
-        marketplaceId: 'A13V1IB3VIYZZH'
+        sellerId: '',
+        marketplaceId: ''
       })
     });
     console.log('[AUTO_BOOT_DEV] amazon credentials:', await credResAmz.text());
