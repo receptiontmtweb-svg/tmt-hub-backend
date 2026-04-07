@@ -8915,6 +8915,8 @@ async function syncFromAPI(mp) {
       result = await BackendAPI.call('/api/amazon/sync', {}, 'POST');
     } else if (mp === 'cdiscount') {
       result = await BackendAPI.call('/api/octopia/sync', {}, 'POST');
+    } else if (mp === 'ebay') {
+      result = await BackendAPI.call('/api/ebay/sync', {}, 'POST');
     } else {
       throw new Error(`Synchronisation ${mp} non branchée dans cette version`);
     }
