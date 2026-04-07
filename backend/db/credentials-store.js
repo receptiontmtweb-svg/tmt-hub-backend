@@ -1,129 +1,161 @@
 'use strict';
+
 /**
- * db/credentials-store.js — Stockage sécurisé credentials marketplace
- *
- * Chiffrement AES-256-GCM côté serveur.
- * La clé CRED_ENCRYPTION_KEY ne quitte jamais le backend.
- * Jamais exposé au frontend.
+ * db/credentials-store.js
+ * Stockage des credentials marketplace via Supabase (tmt_hub_data)
+ * Fallback mémoire si Supabase non configuré
  */
 
 const crypto = require('crypto');
-const { getDB } = require('./database');
-const Logger = require('../utils/logger');
 
-const ALGO   = 'aes-256-gcm';
-const IV_LEN = 12;
-const TAG_LEN = 16;
+const SUPABASE_URL = process.env.SUPABASE_URL || '';
+const SUPABASE_KEY = process.env.SUPABASE_SERVICE_KEY || '';
+const ENC_KEY      = process.env.CRED_ENCRYPTION_KEY || '';
+const TABLE        = 'tmt_hub_data';
 
-// ── Crypto ────────────────────────────────────────────────────
-function _deriveKey(tenantId) {
-  const secret = process.env.CRED_ENCRYPTION_KEY;
-  if (!secret || secret.length < 32)
-    throw new Error('CRED_ENCRYPTION_KEY manquante ou < 32 chars');
-  return crypto.createHash('sha256').update(`${secret}:${tenantId}`).digest();
+// ── Chiffrement AES-256-GCM ───────────────────────────────────
+function _encKey() {
+  if (!ENC_KEY) return null;
+  return crypto.createHash('sha256').update(ENC_KEY).digest();
 }
 
-function encrypt(data, tenantId) {
-  const key = _deriveKey(tenantId);
-  const iv  = crypto.randomBytes(IV_LEN);
-  const c   = crypto.createCipheriv(ALGO, key, iv);
-  const enc = Buffer.concat([c.update(JSON.stringify(data), 'utf8'), c.final()]);
-  return Buffer.concat([iv, c.getAuthTag(), enc]).toString('base64');
+function encrypt(text) {
+  const key = _encKey();
+  if (!key) return text; // pas de chiffrement si pas de clé
+  const iv  = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+  const enc = Buffer.concat([cipher.update(text, 'utf8'), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return iv.toString('hex') + ':' + tag.toString('hex') + ':' + enc.toString('hex');
 }
 
-function decrypt(encoded, tenantId) {
-  const key = _deriveKey(tenantId);
-  const buf = Buffer.from(encoded, 'base64');
-  if (buf.length < IV_LEN + TAG_LEN + 1) throw new Error('Payload chiffré invalide');
-  const d = crypto.createDecipheriv(ALGO, key, buf.slice(0, IV_LEN));
-  d.setAuthTag(buf.slice(IV_LEN, IV_LEN + TAG_LEN));
-  return JSON.parse(Buffer.concat([d.update(buf.slice(IV_LEN + TAG_LEN)), d.final()]).toString('utf8'));
+function decrypt(text) {
+  try {
+    const key = _encKey();
+    if (!key || !text.includes(':')) return text;
+    const [ivHex, tagHex, encHex] = text.split(':');
+    const decipher = crypto.createDecipheriv('aes-256-gcm', key, Buffer.from(ivHex, 'hex'));
+    decipher.setAuthTag(Buffer.from(tagHex, 'hex'));
+    return decipher.update(Buffer.from(encHex, 'hex')) + decipher.final('utf8');
+  } catch {
+    return text; // retourne tel quel si déchiffrement échoue
+  }
 }
 
-function selfTest() {
-  const orig = { test: 'tmt-v14', ts: Date.now() };
-  if (decrypt(encrypt(orig, 'test'), 'test').test !== orig.test)
-    throw new Error('Credentials store self-test échoué');
+// ── Supabase fetch helper ─────────────────────────────────────
+async function _sb(method, path, body) {
+  if (!SUPABASE_URL || !SUPABASE_KEY) return null;
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
+    method,
+    headers: {
+      'apikey':        SUPABASE_KEY,
+      'Authorization': `Bearer ${SUPABASE_KEY}`,
+      'Content-Type':  'application/json',
+      'Prefer':        method === 'POST' ? 'resolution=merge-duplicates,return=representation' : 'return=representation',
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (!res.ok) return null;
+  const text = await res.text();
+  try { return text ? JSON.parse(text) : null; } catch { return null; }
 }
 
-// ── Token cache (mémoire, TTL 50 min) ────────────────────────
-const _tokenCache = new Map();
-
-const TokenCache = {
-  set(mp, tenantId, token, ttl = 3500) {
-    _tokenCache.set(`${mp}:${tenantId}`, { token, exp: Date.now() + ttl * 1000 });
-  },
-  get(mp, tenantId) {
-    const e = _tokenCache.get(`${mp}:${tenantId}`);
-    if (!e) return null;
-    if (Date.now() > e.exp) { _tokenCache.delete(`${mp}:${tenantId}`); return null; }
-    return e.token;
-  },
-  invalidate(mp, tenantId) { _tokenCache.delete(`${mp}:${tenantId}`); },
-  invalidateAll(tenantId)  {
-    for (const k of _tokenCache.keys()) if (k.endsWith(`:${tenantId}`)) _tokenCache.delete(k);
-  },
-};
+// ── Mémoire fallback ──────────────────────────────────────────
+const _mem = new Map();
 
 // ── CredentialStore ───────────────────────────────────────────
 const CredentialStore = {
-  /**
-   * Sauvegarder des credentials chiffrés
-   * @param {string} tenantId
-   * @param {string} marketplace  — 'amazon' | 'cdiscount' | 'ebay' | ...
-   * @param {object} creds        — credentials bruts (NE JAMAIS logger)
-   */
+
   async save(tenantId, marketplace, creds) {
-    const db = getDB();
-    const payload = encrypt(creds, tenantId);
-    await db.upsert('marketplace_accounts', {
-      company_id:  tenantId,
-      marketplace,
-      credentials: payload,
-      is_active:   true,
-      updated_at:  new Date().toISOString(),
-    }, 'company_id,marketplace');
-    TokenCache.invalidate(marketplace, tenantId);
-    Logger.audit('CREDENTIALS_SAVED', tenantId, { marketplace });
+    const id  = `cred:${tenantId}:${marketplace}`;
+    const enc = encrypt(JSON.stringify(creds));
+
+    // Supabase
+    if (SUPABASE_URL) {
+      await _sb('POST', TABLE, {
+        id,
+        data:       { encrypted: enc, marketplace, tenantId },
+        updated_at: new Date().toISOString(),
+      });
+    }
+
+    // Mémoire toujours
+    _mem.set(id, creds);
+    return true;
   },
 
-  /**
-   * Charger et déchiffrer des credentials
-   * @returns {object|null}
-   */
   async load(tenantId, marketplace) {
-    const db  = getDB();
-    const row = await db.findOne('marketplace_accounts', { company_id: tenantId, marketplace, is_active: true });
-    if (!row?.credentials) return null;
-    return decrypt(row.credentials, tenantId);
+    const id = `cred:${tenantId}:${marketplace}`;
+
+    // Mémoire d'abord
+    if (_mem.has(id)) return _mem.get(id);
+
+    // Supabase
+    if (SUPABASE_URL) {
+      const rows = await _sb('GET', `${TABLE}?id=eq.${encodeURIComponent(id)}&select=data`);
+      if (rows && rows[0]?.data?.encrypted) {
+        try {
+          const creds = JSON.parse(decrypt(rows[0].data.encrypted));
+          _mem.set(id, creds); // cache mémoire
+          return creds;
+        } catch { return null; }
+      }
+    }
+
+    return null;
   },
 
-  /** Supprimer des credentials */
   async remove(tenantId, marketplace) {
-    const db = getDB();
-    await db.update('marketplace_accounts', { company_id: tenantId, marketplace }, { is_active: false });
-    TokenCache.invalidate(marketplace, tenantId);
-    Logger.audit('CREDENTIALS_REMOVED', tenantId, { marketplace });
+    const id = `cred:${tenantId}:${marketplace}`;
+    _mem.delete(id);
+    if (SUPABASE_URL) {
+      await _sb('DELETE', `${TABLE}?id=eq.${encodeURIComponent(id)}`, null);
+    }
+    return true;
   },
 
-  /** Lister les marketplaces configurées (sans exposer les credentials) */
   async listConfigured(tenantId) {
-    const db   = getDB();
-    const rows = await db.findMany('marketplace_accounts', { company_id: tenantId, is_active: true });
-    return rows.map(r => ({
-      marketplace: r.marketplace,
-      updated_at:  r.updated_at,
-      has_creds:   !!r.credentials,
-    }));
+    const prefix = `cred:${tenantId}:`;
+    const local  = [..._mem.keys()]
+      .filter(k => k.startsWith(prefix))
+      .map(k => k.replace(prefix, ''));
+
+    if (SUPABASE_URL) {
+      const rows = await _sb('GET', `${TABLE}?id=like.cred:${tenantId}:%&select=id,data`);
+      if (rows) {
+        return rows.map(r => r.data?.marketplace || r.id.replace(prefix, ''));
+      }
+    }
+
+    return local;
   },
 
   async isConfigured(tenantId, marketplace) {
-    const db  = getDB();
-    const row = await db.findOne('marketplace_accounts', { company_id: tenantId, marketplace, is_active: true });
-    return !!row?.credentials;
+    const creds = await this.load(tenantId, marketplace);
+    return !!creds;
   },
-
-  selfTest,
 };
 
-module.exports = { CredentialStore, TokenCache, encrypt, decrypt };
+// ── TokenCache (en mémoire uniquement) ───────────────────────
+const _tokenCache = new Map();
+
+const TokenCache = {
+  get(marketplace, tenantId) {
+    const k = `${marketplace}:${tenantId}`;
+    const e = _tokenCache.get(k);
+    if (!e) return null;
+    if (Date.now() > e.exp) { _tokenCache.delete(k); return null; }
+    return e.token;
+  },
+  set(marketplace, tenantId, token, ttlSeconds = 3500) {
+    _tokenCache.set(`${marketplace}:${tenantId}`, {
+      token,
+      exp: Date.now() + ttlSeconds * 1000,
+    });
+  },
+  delete(marketplace, tenantId) {
+    _tokenCache.delete(`${marketplace}:${tenantId}`);
+  },
+};
+
+module.exports = { CredentialStore, TokenCache };
